@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Optional, List, Dict, Any
 
 from config import DB_PATH, DATABASE_URL, DEFAULT_ADVANCE_MINUTES
@@ -21,7 +22,8 @@ async def _get_pg_pool():
             dsn=DATABASE_URL,
             min_size=1,
             max_size=10,
-            command_timeout=15
+            command_timeout=15,
+            max_inactive_connection_lifetime=30  # Neon suspends idle connections; recycle before that
         )
     return _pg_pool
 
@@ -254,7 +256,7 @@ async def get_active_users_for_location(lat_group: float, lon_group: float) -> L
                 WHERE is_active = 1
                   AND ROUND(CAST(latitude AS numeric), 2) = $1
                   AND ROUND(CAST(longitude AS numeric), 2) = $2;
-            """, lat_group, lon_group)
+            """, Decimal(str(lat_group)), Decimal(str(lon_group)))
             return [dict(r) for r in rows]
     else:
         import aiosqlite

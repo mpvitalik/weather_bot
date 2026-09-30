@@ -23,7 +23,8 @@ def _in_cooldown(last_alert: Any, now: datetime) -> bool:
     if not last_alert:
         return False
     try:
-        last_dt = datetime.fromisoformat(last_alert)
+        # PostgreSQL returns datetime objects, SQLite returns ISO strings
+        last_dt = last_alert if isinstance(last_alert, datetime) else datetime.fromisoformat(last_alert)
         if last_dt.tzinfo is None:
             last_dt = last_dt.replace(tzinfo=timezone.utc)
         return (now - last_dt) < timedelta(minutes=ALERT_COOLDOWN_MINUTES)
