@@ -1,0 +1,16 @@
+app = 'mpvitalik-weather-bot'
+primary_region = 'fra'
+
+[build]
+
+[env]
+  DB_PATH = '/data/weather_bot.db'
+
+[mounts]
+  source = 'weather_data'
+  destination = '/data'
+
+[vm]
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 256

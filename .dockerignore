@@ -1,0 +1,12 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.env
+weather_bot.db
+weather_bot.db-wal
+weather_bot.db-shm
+*.log
+.DS_Store

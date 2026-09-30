@@ -34,8 +34,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 # OpenWeatherMap API Key (no default: never commit keys to the source code)
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "").strip()
 
-# Path to SQLite database
-DB_PATH = BASE_DIR / "weather_bot.db"
+# Path to SQLite database (can be customized via DB_PATH env var, e.g. for mounted volumes)
+DB_PATH = Path(os.getenv("DB_PATH", str(BASE_DIR / "weather_bot.db")))
 
 # Weather monitoring interval in seconds (default: 5 minutes)
 CHECK_INTERVAL_SECONDS = _int_env("CHECK_INTERVAL_SECONDS", 300, minimum=30)
