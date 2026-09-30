@@ -70,6 +70,28 @@ async def main():
     # Launch background weather monitoring loop
     monitor_task = asyncio.create_task(start_weather_monitor(bot))
 
+    # Start lightweight HTTP server for Render Free Web Service healthchecks
+    http_runner = None
+    try:
+        import os
+        from aiohttp import web
+        port = int(os.getenv("PORT", "8080"))
+        
+        async def health_check(request):
+            return web.Response(text="Weather Rain Alert Bot is running 24/7! 🌧", status=200)
+            
+        app = web.Application()
+        app.router.add_get("/", health_check)
+        app.router.add_get("/health", health_check)
+        
+        http_runner = web.AppRunner(app)
+        await http_runner.setup()
+        site = web.TCPSite(http_runner, "0.0.0.0", port)
+        await site.start()
+        logger.info(f"Health-check HTTP server listening on port {port}")
+    except Exception as http_err:
+        logger.warning(f"Could not start HTTP health server: {http_err}")
+
     logger.info("🤖 Weather Rain Alert Telegram Bot is starting...")
     try:
         # Drop pending updates to prevent processing old messages on restart
@@ -77,6 +99,8 @@ async def main():
         await dp.start_polling(bot)
     finally:
         logger.info("Shutting down bot and canceling background tasks...")
+        if http_runner:
+            await http_runner.cleanup()
         monitor_task.cancel()
         await asyncio.gather(monitor_task, return_exceptions=True)
         await WeatherService.close()
