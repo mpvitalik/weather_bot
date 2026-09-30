@@ -34,7 +34,13 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 # OpenWeatherMap API Key (no default: never commit keys to the source code)
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "").strip()
 
-# Path to SQLite database (can be customized via DB_PATH env var, e.g. for mounted volumes)
+# Database configuration: PostgreSQL URL (Neon / Supabase) or local SQLite fallback
+_raw_db_url = os.getenv("DATABASE_URL", "").strip()
+if _raw_db_url.startswith("postgres://"):
+    _raw_db_url = "postgresql://" + _raw_db_url[len("postgres://"):]
+DATABASE_URL = _raw_db_url
+
+# Path to local SQLite database (used if DATABASE_URL is not set)
 DB_PATH = Path(os.getenv("DB_PATH", str(BASE_DIR / "weather_bot.db")))
 
 # Weather monitoring interval in seconds (default: 5 minutes)

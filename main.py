@@ -98,6 +98,8 @@ async def main():
         monitor_task.cancel()
         await asyncio.gather(monitor_task, return_exceptions=True)
         await WeatherService.close()
+        from database import close_db
+        await close_db()
         if health_runner:
             await health_runner.cleanup()
         await bot.session.close()
