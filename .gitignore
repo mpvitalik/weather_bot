@@ -1,0 +1,24 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environment
+venv/
+env/
+ENV/
+.venv/
+
+# Local sensitive configuration and database
+.env
+weather_bot.db
+weather_bot.db-wal
+weather_bot.db-shm
+*.log
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+.DS_Store
