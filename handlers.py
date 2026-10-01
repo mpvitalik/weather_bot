@@ -235,7 +235,7 @@ async def cmd_current_weather(message: Message, state: FSMContext):
         f"📖 <b>Состояние:</b> {html.escape(weather['description'])}\n"
         f"💧 <b>Влажность:</b> {weather['humidity']}%\n"
         f"💨 <b>Ветер:</b> {weather['wind_speed']} м/с\n"
-        f"🧭 <b>Давление:</b> {weather['pressure_mmhg']} мм рт. ст.\n\n"
+        f"🧭 <b>Давление:</b> {str(weather['pressure_mmhg']) + ' мм рт. ст.' if weather['pressure_mmhg'] is not None else 'н/д'}\n\n"
         f"🌧 <b>Прогноз осадков:</b>\n{rain_status}\n\n"
         f"🔬 <i>Ансамблевый расчет по {weather.get('sources_count', 1)} источникам ({html.escape(sources_str)})</i>"
     )

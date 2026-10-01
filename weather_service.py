@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Tuple
 
 import aiohttp
@@ -16,6 +16,10 @@ RAIN_THRESHOLD_MM = 0.1
 FORECAST_HORIZON_MINUTES = 60
 CACHE_TTL_SECONDS = 120
 CACHE_MAX_ENTRIES = 2000
+MET_BASE = "https://api.met.no/weatherapi"
+# MET Norway requires an identifying User-Agent
+MET_HEADERS = {"User-Agent": "RainAlertTelegramBot/1.0 github.com/mpvitalik/weather_bot"}
+
 OM_CURRENT_FIELDS = (
     "temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m,"
     "precipitation,weather_code,apparent_temperature"
@@ -175,6 +179,101 @@ def _analyze_hourly(data: Dict[str, Any]) -> Tuple[bool, Optional[int], float, O
     return raining_now, None, 0.0, temp
 
 
+def _parse_utc(value: Any) -> Optional[datetime]:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _met_entries(data: Any) -> List[Dict[str, Any]]:
+    props = data.get("properties") if isinstance(data, dict) else None
+    return (props or {}).get("timeseries") or []
+
+
+def _met_symbol_ru(symbol: Optional[str]) -> Optional[str]:
+    """Maps a MET Norway symbol_code (e.g. 'partlycloudy_day', 'lightrain') to a Russian description."""
+    if not symbol:
+        return None
+    base = symbol.split("_")[0]
+    if "thunder" in base:
+        return "Гроза ⚡️"
+    for key, text in (
+        ("sleet", "Дождь со снегом 🌨"), ("snow", "Снег ❄️"),
+        ("heavyrain", "Сильный дождь 🌧🌧"), ("lightrain", "Небольшой дождь 🌦"), ("rain", "Дождь 🌧"),
+    ):
+        if key in base:
+            return text
+    return {
+        "clearsky": "Ясно ☀️", "fair": "В основном ясно 🌤", "partlycloudy": "Переменная облачность ⛅️",
+        "cloudy": "Пасмурно ☁️", "fog": "Туман 🌫",
+    }.get(base)
+
+
+def _parse_met_current(data: Any) -> Optional[Tuple[Dict[str, float], Optional[str]]]:
+    """Current conditions from MET Norway locationforecast. Sea-level pressure is skipped on purpose."""
+    entries = _met_entries(data)
+    if not entries:
+        return None
+    first = entries[0].get("data") or {}
+    details = (first.get("instant") or {}).get("details") or {}
+    temp, humidity, wind = (details.get(k) for k in ("air_temperature", "relative_humidity", "wind_speed"))
+    if not all(_is_num(v) for v in (temp, humidity, wind)):
+        return None
+    symbol = ((first.get("next_1_hours") or {}).get("summary") or {}).get("symbol_code")
+    return {"temp": temp, "humidity": humidity, "wind_speed": round(wind, 1)}, _met_symbol_ru(symbol)
+
+
+def _analyze_met_nowcast(data: Any, now: datetime) -> Tuple[bool, Optional[int], float, Optional[float]]:
+    """
+    MET Norway nowcast (5-minute radar-based precipitation_rate in mm/h).
+    Returns (is_raining_now, onset_minutes, rate_mm_h, temperature) like the other analyzers.
+    """
+    raining_now, onset, amount, temp = False, None, 0.0, None
+    for entry in _met_entries(data):
+        t = _parse_utc(entry.get("time"))
+        details = ((entry.get("data") or {}).get("instant") or {}).get("details") or {}
+        if temp is None and _is_num(details.get("air_temperature")):
+            temp = details["air_temperature"]
+        rate = details.get("precipitation_rate")
+        if t is None or not _is_num(rate):
+            continue
+        minutes = (t - now).total_seconds() / 60
+        if minutes > FORECAST_HORIZON_MINUTES:
+            break
+        if rate >= RAIN_THRESHOLD_MM:
+            if minutes <= 5:
+                raining_now = True
+            elif onset is None:
+                onset, amount = max(5, 5 * round(minutes / 5)), rate
+    return raining_now, (None if raining_now else onset), amount, temp
+
+
+def _analyze_met_hourly(data: Any, now: datetime) -> Tuple[bool, Optional[int], float, Optional[float]]:
+    """
+    MET Norway hourly forecast, used where there is no radar nowcast. If the current hour is already wet
+    no onset is reported (we cannot tell when exactly it started), so no false "rain is coming" alerts.
+    """
+    slots = []
+    for entry in _met_entries(data):
+        t = _parse_utc(entry.get("time"))
+        if t is None:
+            continue
+        d = entry.get("data") or {}
+        amount = ((d.get("next_1_hours") or {}).get("details") or {}).get("precipitation_amount")
+        temp = ((d.get("instant") or {}).get("details") or {}).get("air_temperature")
+        slots.append((t, amount if _is_num(amount) else None, temp if _is_num(temp) else None))
+    current = [s for s in slots if s[0] <= now]
+    temp = current[-1][2] if current else None
+    if current and (current[-1][1] or 0) >= RAIN_THRESHOLD_MM:
+        return False, None, 0.0, temp
+    for t, amount, _ in slots:
+        minutes = (t - now).total_seconds() / 60
+        if 0 < minutes <= FORECAST_HORIZON_MINUTES and (amount or 0) >= RAIN_THRESHOLD_MM:
+            return False, max(15, int(round(minutes))), amount, temp
+    return False, None, 0.0, temp
+
+
 class WeatherService:
     _session: Optional[aiohttp.ClientSession] = None
     _cache: Dict[Tuple[str, float, float], Tuple[float, Any]] = {}
@@ -194,10 +293,12 @@ class WeatherService:
         cls._session = None
 
     @classmethod
-    async def _fetch_json(cls, url: str, params: Dict[str, Any], timeout: float = 6) -> Optional[Any]:
+    async def _fetch_json(
+        cls, url: str, params: Dict[str, Any], timeout: float = 6, headers: Optional[Dict[str, str]] = None
+    ) -> Optional[Any]:
         try:
             async with cls._get_session().get(
-                url, params=params, timeout=aiohttp.ClientTimeout(total=timeout)
+                url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
             ) as resp:
                 if resp.status == 200:
                     return await resp.json(content_type=None)
@@ -221,6 +322,38 @@ class WeatherService:
             if len(cls._cache) >= CACHE_MAX_ENTRIES:
                 cls._cache.clear()
         cls._cache[(kind, round(lat, 2), round(lon, 2))] = (time.monotonic(), value)
+
+    @classmethod
+    async def _met_forecast(cls, lat: float, lon: float) -> Optional[Any]:
+        """MET Norway hourly locationforecast (global), cached."""
+        cached = cls._cache_get("met_hourly", lat, lon)
+        if cached is not None:
+            return cached
+        data = await cls._fetch_json(
+            f"{MET_BASE}/locationforecast/2.0/compact",
+            {"lat": round(lat, 4), "lon": round(lon, 4)}, headers=MET_HEADERS,
+        )
+        if data:
+            cls._cache_put("met_hourly", lat, lon, data)
+        return data
+
+    @classmethod
+    async def _met_nowcast(cls, lat: float, lon: float) -> Optional[Any]:
+        """MET Norway 5-minute radar nowcast (Nordic/Baltic area). Returns None when there is no radar coverage."""
+        cached = cls._cache_get("met_now", lat, lon)
+        if cached is not None:
+            return cached or None
+        data = await cls._fetch_json(
+            f"{MET_BASE}/nowcast/2.0/complete",
+            {"lat": round(lat, 4), "lon": round(lon, 4)}, headers=MET_HEADERS,
+        )
+        if data is None:  # HTTP 422 = outside radar coverage; remember it to avoid re-requesting
+            cls._cache_put("met_now", lat, lon, {})
+            return None
+        coverage = ((data.get("properties") or {}).get("meta") or {}).get("radar_coverage")
+        usable = data if coverage == "ok" else {}
+        cls._cache_put("met_now", lat, lon, usable)
+        return usable or None
 
     # ---------- geocoding ----------
 
@@ -294,7 +427,7 @@ class WeatherService:
             "latitude": lat, "longitude": lon,
             "current": OM_CURRENT_FIELDS, "timezone": "auto",
         }
-        r_owm, r_om, r_gfs, r_dwd = await asyncio.gather(
+        r_owm, r_om, r_gfs, r_dwd, r_met = await asyncio.gather(
             WeatherService._fetch_json(
                 "https://api.openweathermap.org/data/2.5/weather",
                 {"lat": lat, "lon": lon, "appid": OPENWEATHER_API_KEY, "units": "metric", "lang": "ru"},
@@ -302,6 +435,7 @@ class WeatherService:
             WeatherService._fetch_json("https://api.open-meteo.com/v1/forecast", om_params),
             WeatherService._fetch_json("https://api.open-meteo.com/v1/gfs", om_params),
             WeatherService._fetch_json("https://api.open-meteo.com/v1/dwd-icon", om_params),
+            WeatherService._met_forecast(lat, lon),
         )
 
         sources: Dict[str, Dict[str, float]] = {}
@@ -342,11 +476,20 @@ class WeatherService:
             if name == "Open-Meteo" and curr.get("weather_code") in WMO_WEATHER_CODES:
                 descriptions.append(WMO_WEATHER_CODES[curr["weather_code"]])
 
+        met = _parse_met_current(r_met)
+        if met is not None:
+            sources["MET Norway"] = met[0]
+            if not descriptions and met[1]:
+                descriptions.append(met[1])
+
         if not sources:
             return None
 
-        def avg(key: str, digits: Optional[int] = None) -> float:
-            values = [s[key] for s in sources.values()]
+        def avg(key: str, digits: Optional[int] = None) -> Optional[float]:
+            values = [s.get(key, s["temp"] if key == "feels_like" else None) for s in sources.values()]
+            values = [v for v in values if v is not None]
+            if not values:
+                return None
             return round(sum(values) / len(values), digits) if digits is not None else round(sum(values) / len(values))
 
         result = {
@@ -389,10 +532,12 @@ class WeatherService:
         minutely_params = {**common, "minutely_15": "precipitation,weather_code"}
         hourly_params = {**common, "hourly": "precipitation,weather_code"}
 
-        r_om, r_dwd, r_gfs = await asyncio.gather(
+        r_om, r_dwd, r_gfs, r_met_now, r_met_hourly = await asyncio.gather(
             WeatherService._fetch_json("https://api.open-meteo.com/v1/forecast", minutely_params),
             WeatherService._fetch_json("https://api.open-meteo.com/v1/dwd-icon", minutely_params),
             WeatherService._fetch_json("https://api.open-meteo.com/v1/gfs", hourly_params),
+            WeatherService._met_nowcast(lat, lon),
+            WeatherService._met_forecast(lat, lon),
         )
 
         models_checked = 0
@@ -401,11 +546,19 @@ class WeatherService:
         amounts: List[float] = []
         temperatures: List[float] = []
 
-        for resp, analyzer, key in (
+        now_utc = datetime.now(timezone.utc)
+        models = [
             (r_om, _analyze_minutely, "minutely_15"),
             (r_dwd, _analyze_minutely, "minutely_15"),
             (r_gfs, _analyze_hourly, "hourly"),
-        ):
+        ]
+        # MET Norway counts as one model: radar nowcast where covered, otherwise hourly forecast
+        if r_met_now:
+            models.append((r_met_now, lambda d: _analyze_met_nowcast(d, now_utc), "properties"))
+        elif r_met_hourly:
+            models.append((r_met_hourly, lambda d: _analyze_met_hourly(d, now_utc), "properties"))
+
+        for resp, analyzer, key in models:
             if not isinstance(resp, dict) or key not in resp:
                 continue
             models_checked += 1
